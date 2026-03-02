@@ -203,6 +203,17 @@ impl HistoryManager {
         !path_str.contains("/.fastembed_cache/")
     }
 
+    pub async fn get_snapshot_diff(&self, snapshot_id: &str) -> Result<String> {
+        let diff: String = sqlx::query_scalar("SELECT diff_patch FROM snapshots WHERE id = ? OR id LIKE ?")
+            .bind(snapshot_id)
+            .bind(format!("{}%", snapshot_id))
+            .fetch_one(&self.db.sqlite)
+            .await
+            .context(format!("Snapshot {} not found", snapshot_id))?;
+            
+        Ok(diff)
+    }
+
     pub async fn restore_file(&self, file_path: &str, snapshot_id: Option<String>) -> Result<()> {
         // Try to handle both relative and absolute paths for searching
         let search_path = if PathBuf::from(file_path).is_relative() {

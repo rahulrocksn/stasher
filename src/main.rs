@@ -36,6 +36,8 @@ enum Commands {
         #[arg(short, long, default_value_t = 30)]
         days: u32,
     },
+    /// Show the differences recorded in a specific snapshot
+    Diff { snapshot: String },
 }
 
 fn find_stasher_root(start_path: &Path) -> Option<PathBuf> {
@@ -167,6 +169,27 @@ async fn main() -> Result<()> {
             println!("✅ Cleanup complete:");
             println!("   - {} snapshots removed from database", deleted_snaps);
             println!("   - {} unused objects deleted from disk", deleted_objs);
+            Ok(())
+        }
+        Commands::Diff { snapshot } => {
+            use colored::Colorize;
+            let db = db::Database::init(&base_path).await?;
+            let history = history::HistoryManager::new(std::sync::Arc::new(db), base_path.to_path_buf()).await?;
+            
+            let diff = history.get_snapshot_diff(snapshot).await?;
+            println!("📑 Diff for snapshot {}:", snapshot.cyan());
+            
+            for line in diff.lines() {
+                if line.starts_with('+') && !line.starts_with("+++") {
+                    println!("{}", line.green());
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    println!("{}", line.red());
+                } else if line.starts_with("@@") {
+                    println!("{}", line.blue());
+                } else {
+                    println!("{}", line);
+                }
+            }
             Ok(())
         }
     }

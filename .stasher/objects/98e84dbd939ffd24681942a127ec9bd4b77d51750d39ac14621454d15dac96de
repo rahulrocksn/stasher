@@ -1,4 +1,0 @@
-fn main() {
-    println!("Day 1: Initial project setup");
-    println!("Day 2: Added authentication logic for security");
-}

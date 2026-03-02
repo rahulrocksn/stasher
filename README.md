@@ -19,20 +19,17 @@ Stasher eliminates this risk by automatically capturing differential snapshots o
 ### Continuous Snapshotting
 Stasher monitors file system events and captures unified diffs on every save. Unlike full-file backups, this approach minimizes storage overhead while maintaining a granular history of every change.
 
-### Session Awareness
-Changes are automatically grouped into logical working sessions. This allows you to review the "blast radius" of a specific coding session, particularly useful for auditing changes made by AI agents across multiple files.
+### Content-Addressable Storage (CAS)
+Stasher uses a CAS engine for the `.stasher/objects` directory. Every unique version of a file is stored once based on its hash, enabling massive disk space savings through deduplication.
+
+### Smart Move Tracking
+History follows your code, not just your filename. If you move a file from `src/old.rs` to `src/new.rs`, Stasher uses content hashes to automatically connect the history, showing you a continuous timeline of the file's evolution across renames.
 
 ### Semantic Search and Retrieval
-Integrated natural language processing allows you to query your history semantically.
+Integrated natural language processing allows you to query your history semantically via `stasher ask`.
 - **Natural Language Queries:** Search for concepts like "how I handled the JWT implementation this morning."
 - **Deleted Code Recovery:** Surface logic that was removed before a commit.
-- **Time-range Analysis:** View the evolution of a specific file over the last 48 hours.
-
-### Privacy and Local Infrastructure
-Stasher is built with a local-first philosophy.
-- **No Cloud Dependency:** All data stays on your local machine.
-- **No Telemetry:** The system does not report usage data or code content to external servers.
-- **On-Device Embeddings:** Uses local models for code embeddings, ensuring search functionality works offline without leaking sensitive code to third-party APIs.
+- **On-Device Privacy:** Uses a local `nomic-embed-text` model. All embeddings are generated and stored 100% locally.
 
 ---
 
@@ -41,37 +38,15 @@ Stasher is built with a local-first philosophy.
 Stasher consists of a lightweight daemon and a structured storage layer.
 
 ### The Daemon
-- **Language:** Built in Rust for minimal resource footprint (<5MB RAM at idle).
-- **Monitoring:** Uses FSEvents/inotify to watch file saves.
-- **Shell Integration:** Captures terminal commands, output, and execution context to link file changes with the commands that triggered them.
+- **Language:** Built in Rust for minimal resource footprint.
+- **Monitoring:** Uses the `notify` crate to watch file saves across your project root.
+- **PID Locking**: Ensures only one daemon process can monitor a project at a time, preventing database corruption.
+- **Gitignore Awareness**: Automatically respects your `.gitignore` rules (via the `ignore` crate) to keep history clean of `node_modules`, `target`, and other noise.
 
 ### Storage Layer
-- **Metadata:** SQLite (WAL mode) stores structured records of snapshots, session metadata, and terminal logs.
-- **Vector Search:** LanceDB manages code embeddings for hybrid search (vector similarity + full-text + metadata).
-- **Embeddings:** Uses `nomic-embed-code` via a local CPU-bound embedding engine (`fastembed`).
-
----
-
-## Data Schema
-
-### Snapshot Record (SQLite)
-| Field | Type | Description |
-|---|---|---|
-| `snapshot_id` | UUID | Primary key |
-| `session_id` | UUID | Links changes to a working session |
-| `file_path` | String | Path relative to workspace root |
-| `timestamp` | Integer | Unix timestamp (ms) |
-| `diff_patch` | String | Unified diff format |
-| `lines_added` | Integer | Count of additions |
-| `lines_removed` | Integer | Count of removals |
-
-### Vector Record (LanceDB)
-| Field | Type | Description |
-|---|---|---|
-| `vector_id` | UUID | Primary key |
-| `snapshot_id` | UUID | Foreign key to SQLite |
-| `chunk_content` | String | Embedded code fragment |
-| `embedding` | Vector(768) | Semantic representation |
+- **Metadata:** SQLite (WAL mode) stores structured records of snapshots, hashes, and session metadata.
+- **Vector Search:** LanceDB manages code embeddings for lightning-fast semantic similarity search.
+- **CAS Objects**: Content is stored in `.stasher/objects` indexed by BLAKE3 hashes.
 
 ---
 
@@ -79,10 +54,14 @@ Stasher consists of a lightweight daemon and a structured storage layer.
 
 Stasher is controlled via a command-line interface:
 
-- `stasher ask <query>`: Semantic search across your history.
-- `stasher show <file>`: View the timeline for a specific file.
-- `stasher diff --session`: Review changes within the current session.
-- `stasher restore <file> --pre-session`: Revert a file to its state before the current session began.
+- `stasher init`: Initialize a new project and perform an initial sync.
+- `stasher daemon`: Start the background watcher (only one instance allowed).
+- `stasher show <file>`: View the timeline for a file (including history from moved/renamed versions).
+- `stasher diff <snapshot_id>`: Show a colorized diff of exactly what changed in a specific snapshot.
+- `stasher ask <query>`: Semantic natural language search across your history.
+- `stasher restore <file> --snapshot <id>`: Restore a file. Stasher automatically snapshots your current "unsaved" work before overwriting as a safety net.
+- `stasher status`: View project statistics, disk space saved by deduplication, and daemon status.
+- `stasher prune --days <n>`: Clean up snapshots older than `n` days and garbage-collect unused objects.
 
 ---
 

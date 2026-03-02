@@ -18,7 +18,7 @@ Thank you for your interest in contributing. This document outlines the process 
 2. Use a descriptive branch name: `feat/your-feature` or `fix/issue-description`.
 3. Make your changes. Keep commits focused — one logical change per commit.
 4. Write or update tests where applicable.
-5. Ensure linting and tests pass before submitting: `npm run lint && npm test`.
+5. Ensure linting and tests pass before submitting: `cargo clippy && cargo test`.
 6. Submit a pull request against `main` with a clear title and description.
 
 ---

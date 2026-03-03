@@ -3,6 +3,7 @@ mod daemon;
 mod history;
 mod search;
 mod hub;
+mod server;
 
 use std::path::{Path, PathBuf};
 use anyhow::Result;
@@ -45,6 +46,8 @@ enum Commands {
     Projects,
     /// Search across all tracked projects
     GlobalAsk { query: String },
+    /// Start the Stasher Hub UI Dashboard (local web server)
+    Serve,
 }
 
 fn find_stasher_root(start_path: &Path) -> Option<PathBuf> {
@@ -338,6 +341,10 @@ async fn main() -> Result<()> {
                     println!("{}...", snippet);
                 }
             }
+            Ok(())
+        }
+        Commands::Serve => {
+            server::start_server().await?;
             Ok(())
         }
     }

@@ -42,6 +42,10 @@ impl HistoryManager {
         })
     }
 
+    pub fn get_db(&self) -> &Database {
+        &self.db
+    }
+
     pub async fn record_change(&self, file_path: PathBuf) -> Result<()> {
         let relative_path = file_path.strip_prefix(&self.base_path)
             .unwrap_or(&file_path)
@@ -324,6 +328,18 @@ impl HistoryManager {
         Ok(())
     }
 
+    pub async fn list_all_snapshots(&self, limit: i64) -> Result<Vec<SnapshotSummary>> {
+        let snapshots = sqlx::query_as::<_, SnapshotSummary>(
+            "SELECT id, timestamp, lines_added, lines_removed, file_path, content_hash, diff_patch FROM snapshots 
+             ORDER BY timestamp DESC LIMIT ?"
+        )
+        .bind(limit)
+        .fetch_all(&self.db.sqlite)
+        .await?;
+
+        Ok(snapshots)
+    }
+
     pub async fn list_snapshots(&self, file_path: &str) -> Result<Vec<SnapshotSummary>> {
         let rel_path = self.to_stasher_relative(file_path);
         let mut all_results = Vec::new();
@@ -335,7 +351,7 @@ impl HistoryManager {
             seen_paths.insert(current_search_path.clone());
 
             let mut snapshots = sqlx::query_as::<_, SnapshotSummary>(
-                "SELECT id, timestamp, lines_added, lines_removed, file_path, content_hash FROM snapshots 
+                "SELECT id, timestamp, lines_added, lines_removed, file_path, content_hash, diff_patch FROM snapshots 
                  WHERE file_path = ? OR file_path LIKE ? 
                  ORDER BY timestamp DESC"
             )
@@ -373,7 +389,7 @@ impl HistoryManager {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, serde::Serialize)]
 pub struct SnapshotSummary {
     pub id: String,
     pub timestamp: i64,
@@ -381,8 +397,10 @@ pub struct SnapshotSummary {
     pub lines_removed: i32,
     pub file_path: String,
     pub content_hash: String,
+    pub diff_patch: String,
 }
 
+#[derive(serde::Serialize)]
 pub struct ProjectStats {
     pub total_snapshots: i64,
     pub total_sessions: i64,

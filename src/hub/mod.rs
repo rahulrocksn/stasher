@@ -14,7 +14,6 @@ pub struct ProjectInfo {
 
 pub struct StasherHub {
     pub pool: SqlitePool,
-    pub hub_dir: PathBuf,
 }
 
 impl StasherHub {
@@ -45,7 +44,7 @@ impl StasherHub {
         .execute(&pool)
         .await?;
 
-        Ok(Self { pool, hub_dir })
+        Ok(Self { pool })
     }
 
     pub async fn register_project(&self, project_path: &Path) -> Result<()> {
@@ -82,11 +81,5 @@ impl StasherHub {
         Ok(projects)
     }
 
-    pub async fn unregister_project(&self, path: &str) -> Result<()> {
-        sqlx::query("DELETE FROM projects WHERE path = ?")
-            .bind(path)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 }

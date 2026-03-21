@@ -1,6 +1,6 @@
 use anyhow::{Result, Context};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -81,5 +81,44 @@ impl StasherHub {
         Ok(projects)
     }
 
+    /// Aggregate tag usage across all registered projects.
+    pub async fn get_tag_analytics(&self) -> Result<std::collections::HashMap<String, u64>> {
+        use std::collections::HashMap;
+
+        let projects = self.list_projects().await?;
+        let mut tag_counts: HashMap<String, u64> = HashMap::new();
+
+        for project in projects {
+            let project_path = std::path::PathBuf::from(&project.path);
+            if !project_path.exists() {
+                continue;
+            }
+
+            let stasher_db = project_path.join(".stasher/metadata.db");
+            if !stasher_db.exists() {
+                continue;
+            }
+
+            let options = SqliteConnectOptions::new()
+                .filename(&stasher_db)
+                .create_if_missing(false);
+
+            if let Ok(project_pool) = SqlitePool::connect_with(options).await {
+                let rows: Vec<(String,)> = sqlx::query_as(
+                    "SELECT COALESCE(tags, '') FROM sessions WHERE tags IS NOT NULL AND tags != ''"
+                )
+                .fetch_all(&project_pool)
+                .await
+                .unwrap_or_default();
+
+                for (tags_str,) in rows {
+                    for tag in tags_str.split(',').filter(|t| !t.is_empty()) {
+                        *tag_counts.entry(tag.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(tag_counts)
     }
 }

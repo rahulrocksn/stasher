@@ -25,7 +25,12 @@ enum Commands {
     /// Start the background daemon
     Daemon,
     /// Search history using natural language
-    Ask { query: String },
+    Ask {
+        query: String,
+        /// Filter results by session tag (e.g., "bugfix", "refactor")
+        #[arg(short, long)]
+        tag: Option<String>,
+    },
     /// Show history for a file
     Show { file: String },
     /// Restore a file to a previous version
@@ -47,6 +52,15 @@ enum Commands {
     Projects,
     /// Search across all tracked projects
     GlobalAsk { query: String },
+    /// Manually tag the session containing a snapshot
+    Tag {
+        /// Snapshot ID (or prefix)
+        snapshot_id: String,
+        /// Tag to add (e.g., "bugfix", "refactor", "feature")
+        tag: String,
+    },
+    /// List all sessions with tags, file count, and duration
+    Sessions,
     /// Start the Stasher Hub UI Dashboard (local web server)
     Serve,
 }
@@ -134,13 +148,24 @@ async fn main() -> Result<()> {
             let _ = std::fs::remove_file(lock_path);
             res
         }
-        Commands::Ask { query } => {
-            println!("🔍 Searching for: \"{}\"...", query);
+        Commands::Ask { query, tag } => {
+            if let Some(t) = tag {
+                println!("🔍 Searching for: \"{}\" (tag: {})...", query, t);
+            } else {
+                println!("🔍 Searching for: \"{}\"...", query);
+            }
             let db = db::Database::init(&base_path).await?;
-            let search = search::SearchEngine::new(db.lancedb.clone()).await?;
-            
-            let results = search.search(query.clone(), 5).await?;
-            
+            let db_arc = std::sync::Arc::new(db);
+            let search = search::SearchEngine::new(db_arc.lancedb.clone()).await?;
+
+            let results = if let Some(tag_name) = tag {
+                let history = history::HistoryManager::new(db_arc, base_path.to_path_buf()).await?;
+                let snapshot_ids = history.get_snapshot_ids_for_tag(tag_name).await?;
+                search.search_with_filter(query.clone(), 5, Some(&snapshot_ids)).await?
+            } else {
+                search.search(query.clone(), 5).await?
+            };
+
             if results.is_empty() {
                 println!("🤷 No relevant history found.");
             } else {
@@ -340,6 +365,63 @@ async fn main() -> Result<()> {
                     let snippet: String = res.content.lines().take(3).collect::<Vec<_>>().join("\n");
                     println!("--- Snippet ---");
                     println!("{}...", snippet);
+                }
+            }
+            Ok(())
+        }
+        Commands::Tag { snapshot_id, tag } => {
+            use colored::Colorize;
+            let db = db::Database::init(&base_path).await?;
+            let history = history::HistoryManager::new(std::sync::Arc::new(db), base_path.to_path_buf()).await?;
+
+            let session_id = history.get_session_id_for_snapshot(snapshot_id).await?;
+            history.add_tag_to_session(&session_id, tag).await?;
+            println!(
+                "🏷️  Tag {} added to session {}",
+                tag.bold().green(),
+                &session_id[..7].cyan()
+            );
+            Ok(())
+        }
+        Commands::Sessions => {
+            use colored::Colorize;
+            let db = db::Database::init(&base_path).await?;
+            let history = history::HistoryManager::new(std::sync::Arc::new(db), base_path.to_path_buf()).await?;
+
+            let sessions = history.list_sessions().await?;
+
+            println!("{}", "📋 Sessions".bold().bright_white());
+            println!("{:-<60}", "");
+
+            if sessions.is_empty() {
+                println!("🤷 No sessions found.");
+            } else {
+                for s in sessions {
+                    let tags_display = if s.tags.is_empty() {
+                        "(no tags)".dimmed().to_string()
+                    } else {
+                        s.tags.iter().map(|t| format!("[{}]", t).green().to_string()).collect::<Vec<_>>().join(" ")
+                    };
+
+                    let duration = if s.duration_secs < 60 {
+                        format!("{}s", s.duration_secs)
+                    } else if s.duration_secs < 3600 {
+                        format!("{}m", s.duration_secs / 60)
+                    } else {
+                        format!("{}h {}m", s.duration_secs / 3600, (s.duration_secs % 3600) / 60)
+                    };
+
+                    let status = if s.end_time.is_some() { "closed" } else { "active" };
+
+                    println!(
+                        "{} {} | {} files | {} | {} {}",
+                        &s.id[..7].bright_white().bold(),
+                        format!("({})", status).dimmed(),
+                        s.file_count.to_string().cyan(),
+                        duration.yellow(),
+                        tags_display,
+                        ""
+                    );
                 }
             }
             Ok(())

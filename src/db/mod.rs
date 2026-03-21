@@ -45,9 +45,15 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 start_time INTEGER NOT NULL,
                 end_time INTEGER,
-                meta TEXT
+                meta TEXT,
+                tags TEXT DEFAULT ''
             )"
         ).execute(pool).await?;
+
+        // Migration: add tags column if it doesn't exist (for existing databases)
+        let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN tags TEXT DEFAULT ''")
+            .execute(pool)
+            .await;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS snapshots (

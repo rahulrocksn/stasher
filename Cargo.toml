@@ -25,6 +25,7 @@ similar = "2.4"
 walkdir = "2.4"
 dotenvy = "0.15"
 blake3 = "1.5"
+regex = "1.10"
 home = "0.5"
 axum = { version = "0.7", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }

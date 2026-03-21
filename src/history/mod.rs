@@ -6,6 +6,7 @@ use chrono::Utc;
 use uuid::Uuid;
 use similar::{TextDiff, ChangeTag};
 use std::sync::Arc;
+use regex::Regex;
 use crate::search::SearchEngine;
 
 pub struct HistoryManager {
@@ -340,6 +341,203 @@ impl HistoryManager {
         Ok(snapshots)
     }
 
+    /// Auto-detect tags by analyzing diff content of all snapshots in a session.
+    pub async fn auto_tag_session(&self, session_id: &str) -> Result<Vec<String>> {
+        let diffs: Vec<(String,)> = sqlx::query_as(
+            "SELECT diff_patch FROM snapshots WHERE session_id = ?"
+        )
+        .bind(session_id)
+        .fetch_all(&self.db.sqlite)
+        .await?;
+
+        let combined: String = diffs.into_iter().map(|(d,)| d).collect::<Vec<_>>().join("\n");
+        let tags = Self::detect_tags(&combined);
+
+        if !tags.is_empty() {
+            let tags_str = tags.join(",");
+            // Merge with existing tags
+            let existing: Option<(String,)> = sqlx::query_as(
+                "SELECT tags FROM sessions WHERE id = ?"
+            )
+            .bind(session_id)
+            .fetch_optional(&self.db.sqlite)
+            .await?;
+
+            let merged = if let Some((existing_tags,)) = existing {
+                let mut all: Vec<String> = existing_tags
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                for t in &tags {
+                    if !all.contains(t) {
+                        all.push(t.clone());
+                    }
+                }
+                all.join(",")
+            } else {
+                tags_str
+            };
+
+            sqlx::query("UPDATE sessions SET tags = ? WHERE id = ?")
+                .bind(&merged)
+                .bind(session_id)
+                .execute(&self.db.sqlite)
+                .await?;
+        }
+
+        Ok(tags)
+    }
+
+    /// Detect context tags from diff content using keyword patterns.
+    fn detect_tags(diff_content: &str) -> Vec<String> {
+        let lower = diff_content.to_lowercase();
+        let mut tags = Vec::new();
+
+        let patterns: &[(&str, &str)] = &[
+            ("bugfix", r"(?i)\b(fix|bug|patch|hotfix|resolve|issue)\b"),
+            ("feature", r"(?i)\b(feat|feature|add|implement|new)\b"),
+            ("refactor", r"(?i)\b(refactor|restructure|reorganize|cleanup|clean up)\b"),
+            ("test", r"(?i)\b(test|spec|assert|expect|mock|describe|it\()\b"),
+            ("docs", r"(?i)\b(doc|readme|comment|documentation|changelog)\b"),
+            ("perf", r"(?i)\b(perf|performance|optimize|cache|speed)\b"),
+            ("style", r"(?i)\b(style|format|lint|prettier|eslint)\b"),
+        ];
+
+        for (tag, pattern) in patterns {
+            if let Ok(re) = Regex::new(pattern) {
+                // Only look at changed lines (lines starting with + or -)
+                let changed_lines: String = lower
+                    .lines()
+                    .filter(|l| l.starts_with('+') || l.starts_with('-'))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if re.is_match(&changed_lines) {
+                    tags.push(tag.to_string());
+                }
+            }
+        }
+
+        tags
+    }
+
+    /// Manually add a tag to a session.
+    pub async fn add_tag_to_session(&self, session_id: &str, tag: &str) -> Result<()> {
+        let existing: (String,) = sqlx::query_as(
+            "SELECT COALESCE(tags, '') FROM sessions WHERE id = ?"
+        )
+        .bind(session_id)
+        .fetch_one(&self.db.sqlite)
+        .await
+        .context(format!("Session {} not found", session_id))?;
+
+        let mut tags: Vec<String> = existing.0
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+
+        let tag_str = tag.to_string();
+        if !tags.contains(&tag_str) {
+            tags.push(tag_str);
+        }
+
+        sqlx::query("UPDATE sessions SET tags = ? WHERE id = ?")
+            .bind(tags.join(","))
+            .bind(session_id)
+            .execute(&self.db.sqlite)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get the session ID for a given snapshot.
+    pub async fn get_session_id_for_snapshot(&self, snapshot_id: &str) -> Result<String> {
+        let session_id: String = sqlx::query_scalar(
+            "SELECT session_id FROM snapshots WHERE id = ? OR id LIKE ?"
+        )
+        .bind(snapshot_id)
+        .bind(format!("{}%", snapshot_id))
+        .fetch_one(&self.db.sqlite)
+        .await
+        .context(format!("Snapshot {} not found", snapshot_id))?;
+
+        Ok(session_id)
+    }
+
+    /// Finalize the current session: set end_time and auto-tag.
+    pub async fn finalize_current_session(&self) -> Result<()> {
+        self.finalize_session(&self.current_session_id.to_string()).await
+    }
+
+    /// Finalize a session: set end_time and auto-tag.
+    pub async fn finalize_session(&self, session_id: &str) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        sqlx::query("UPDATE sessions SET end_time = ? WHERE id = ? AND end_time IS NULL")
+            .bind(now)
+            .bind(session_id)
+            .execute(&self.db.sqlite)
+            .await?;
+
+        self.auto_tag_session(session_id).await?;
+        Ok(())
+    }
+
+    /// List all sessions with tags, file count, and duration.
+    pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
+        let sessions = sqlx::query_as::<_, SessionRow>(
+            "SELECT s.id, s.start_time, s.end_time, COALESCE(s.tags, '') as tags,
+                    COUNT(snap.id) as file_count
+             FROM sessions s
+             LEFT JOIN snapshots snap ON snap.session_id = s.id
+             GROUP BY s.id
+             ORDER BY s.start_time DESC"
+        )
+        .fetch_all(&self.db.sqlite)
+        .await?;
+
+        Ok(sessions.into_iter().map(|s| {
+            let duration_ms = s.end_time.unwrap_or_else(|| Utc::now().timestamp_millis()) - s.start_time;
+            SessionSummary {
+                id: s.id,
+                start_time: s.start_time,
+                end_time: s.end_time,
+                tags: s.tags.split(',').filter(|t| !t.is_empty()).map(|t| t.to_string()).collect(),
+                file_count: s.file_count,
+                duration_secs: (duration_ms / 1000) as u64,
+            }
+        }).collect())
+    }
+
+    /// Get all session IDs that have a particular tag.
+    #[allow(dead_code)]
+    pub async fn get_session_ids_with_tag(&self, tag: &str) -> Result<Vec<String>> {
+        let pattern = format!("%{}%", tag);
+        let ids: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM sessions WHERE tags LIKE ?"
+        )
+        .bind(&pattern)
+        .fetch_all(&self.db.sqlite)
+        .await?;
+
+        Ok(ids.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Get all snapshot IDs belonging to sessions with a given tag.
+    pub async fn get_snapshot_ids_for_tag(&self, tag: &str) -> Result<Vec<String>> {
+        let pattern = format!("%{}%", tag);
+        let ids: Vec<(String,)> = sqlx::query_as(
+            "SELECT snap.id FROM snapshots snap
+             JOIN sessions s ON snap.session_id = s.id
+             WHERE s.tags LIKE ?"
+        )
+        .bind(&pattern)
+        .fetch_all(&self.db.sqlite)
+        .await?;
+
+        Ok(ids.into_iter().map(|(id,)| id).collect())
+    }
+
     pub async fn list_snapshots(&self, file_path: &str) -> Result<Vec<SnapshotSummary>> {
         let rel_path = self.to_stasher_relative(file_path);
         let mut all_results = Vec::new();
@@ -407,4 +605,23 @@ pub struct ProjectStats {
     pub objects_size: u64,
     pub total_size: u64,
     pub indexed_count: u64,
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionRow {
+    pub id: String,
+    pub start_time: i64,
+    pub end_time: Option<i64>,
+    pub tags: String,
+    pub file_count: i32,
+}
+
+#[derive(serde::Serialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub start_time: i64,
+    pub end_time: Option<i64>,
+    pub tags: Vec<String>,
+    pub file_count: i32,
+    pub duration_secs: u64,
 }

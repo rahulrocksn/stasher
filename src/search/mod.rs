@@ -78,19 +78,41 @@ impl SearchEngine {
     }
 
     pub async fn search(&self, query: String, limit: usize) -> Result<Vec<SearchRecord>> {
+        self.search_with_filter(query, limit, None).await
+    }
+
+    pub async fn search_with_filter(
+        &self,
+        query: String,
+        limit: usize,
+        tag_filter_snapshot_ids: Option<&[String]>,
+    ) -> Result<Vec<SearchRecord>> {
         use futures_util::StreamExt;
         let query_vec = {
             let mut model = self.model.lock().await;
             model.embed(vec![query], None)?[0].clone()
         };
-        
+
         let table = self.lancedb.open_table("snapshots_v1").execute().await?;
+
+        // When filtering by tag, we fetch more results and post-filter, since
+        // LanceDB doesn't support arbitrary SQL WHERE on non-indexed columns easily.
+        let fetch_limit = if tag_filter_snapshot_ids.is_some() {
+            limit * 10 // over-fetch to compensate for filtering
+        } else {
+            limit
+        };
+
         let mut results = table
             .vector_search(query_vec)?
-            .limit(limit)
+            .limit(fetch_limit)
             .execute()
-                .await?;
-            
+            .await?;
+
+        let allowed_ids: Option<std::collections::HashSet<&str>> = tag_filter_snapshot_ids.map(|ids| {
+            ids.iter().map(|s| s.as_str()).collect()
+        });
+
         let mut records = Vec::new();
         while let Some(batch) = results.next().await {
             let batch = batch?;
@@ -98,27 +120,40 @@ impl SearchEngine {
                 .context("Missing snapshot_id column")?
                 .as_any().downcast_ref::<StringArray>()
                 .context("Failed to downcast snapshot_id")?;
-            
+
             let file_paths = batch.column_by_name("file_path")
                 .context("Missing file_path column")?
                 .as_any().downcast_ref::<StringArray>()
                 .context("Failed to downcast file_path")?;
-            
+
             let contents = batch.column_by_name("content")
                 .context("Missing content column")?
                 .as_any().downcast_ref::<StringArray>()
                 .context("Failed to downcast content")?;
 
             for i in 0..batch.num_rows() {
+                let sid = snapshot_ids.value(i);
+
+                // If we have a tag filter, skip snapshots not in the allowed set
+                if let Some(ref allowed) = allowed_ids {
+                    if !allowed.contains(sid) {
+                        continue;
+                    }
+                }
+
                 records.push(SearchRecord {
-                    snapshot_id: snapshot_ids.value(i).to_string(),
+                    snapshot_id: sid.to_string(),
                     file_path: file_paths.value(i).to_string(),
                     content: contents.value(i).to_string(),
                     vector: vec![],
                 });
+
+                if records.len() >= limit {
+                    return Ok(records);
+                }
             }
         }
-            
+
         Ok(records)
     }
 }

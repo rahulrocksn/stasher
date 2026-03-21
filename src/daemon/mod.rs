@@ -5,6 +5,9 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant};
+
+const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60); // 10 minutes
 
 pub struct StasherDaemon {
     history: Arc<HistoryManager>,
@@ -37,11 +40,31 @@ impl StasherDaemon {
 
         println!("👀 Monitoring changes in: {:?}", self.base_path);
 
-        while let Some(event) = rx.recv().await {
-            self.handle_event(event).await?;
-        }
+        let mut last_activity = Instant::now();
+        let mut session_finalized = false;
 
-        Ok(())
+        loop {
+            tokio::select! {
+                Some(event) = rx.recv() => {
+                    last_activity = Instant::now();
+                    if session_finalized {
+                        // Activity resumed after idle — session is still the same
+                        // (new sessions are created per HistoryManager instantiation)
+                        session_finalized = false;
+                    }
+                    self.handle_event(event).await?;
+                }
+                _ = tokio::time::sleep(SESSION_IDLE_TIMEOUT) => {
+                    if !session_finalized && last_activity.elapsed() >= SESSION_IDLE_TIMEOUT {
+                        println!("💤 Session idle for 10+ minutes. Finalizing and auto-tagging...");
+                        if let Err(e) = self.history.finalize_current_session().await {
+                            eprintln!("⚠️ Failed to finalize session: {}", e);
+                        }
+                        session_finalized = true;
+                    }
+                }
+            }
+        }
     }
 
     async fn handle_event(&self, event: notify::Event) -> Result<()> {
@@ -67,11 +90,11 @@ impl StasherDaemon {
             .to_string();
 
         println!("📝 Snapshotting: {}", relative_path);
-        
+
         if let Err(e) = self.history.record_change(path).await {
             eprintln!("❌ Failed to record change for {}: {}", relative_path, e);
         }
-        
+
         Ok(())
     }
 }

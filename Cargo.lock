@@ -6498,6 +6498,7 @@ dependencies = [
  "ignore",
  "lancedb",
  "notify",
+ "regex",
  "serde",
  "serde_json",
  "similar",

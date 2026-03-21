@@ -72,6 +72,7 @@ pub async fn start_server() -> anyhow::Result<()> {
         .route("/api/search", post(search))
         .route("/api/stats", get(get_project_stats))
         .route("/api/restore", post(handle_restore))
+        .route("/api/analytics", get(get_tag_analytics))
         .fallback_service(ServeDir::new("ui/dist"))
         .layer(cors)
         .with_state(state);
@@ -226,4 +227,11 @@ async fn get_project_stats(
         dedup_ratio: 0.84, // Simplified for now
         pulse,
     }))
+}
+
+async fn get_tag_analytics(
+    State(state): State<AppState>,
+) -> StdResult<Json<std::collections::HashMap<String, u64>>, AppError> {
+    let analytics = state.hub.get_tag_analytics().await?;
+    Ok(Json(analytics))
 }
